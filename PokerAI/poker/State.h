@@ -24,21 +24,21 @@ using namespace std;
 
 Engine* engine = new Engine();
 std::map<unsigned char, int>::iterator actionfind;
-map<unsigned char, int> raise_action_chips = { {'l',0},{'d',0},{'n',0},{(unsigned char)1,0},{(unsigned char)2,0},{(unsigned char)3,0},{(unsigned char)4,0},{(unsigned char)8,0},{(unsigned char)20,0},{(unsigned char)40,0} };
+map<unsigned char, int> raise_action_chips = { {'l',0},{'d',0},{'n',0},{(unsigned char)1,0},{(unsigned char)2,0},{(unsigned char)3,0},{(unsigned char)4,0},{(unsigned char)6,0},{(unsigned char)8,0},{(unsigned char)5,0},{(unsigned char)7,0} };
 
 char suits[] = "scdh";
 char ranks[] = "23456789TJQKA";
 class Pokerstate {
 public:
-	unsigned char has_allin, first_action_of_current_round, player_i_index, betting_stage, n_raises, small_blind, big_blind, winplayer;
+	unsigned char has_allin, first_action_of_current_round, player_i_index, betting_stage, n_raises,totraise, ttpot, winplayer;
 	PokerTable table;
 	unsigned short last_raise, last_bigbet, cur_round_action_num;
+	//short flopallin; // use short error ***turnallin***;
+	//double preflopallin;
 
-	Pokerstate(PokerTable _table, Engine* _engine = NULL, int _small_blind = 50, int _big_blind = 100) {
+	Pokerstate(PokerTable _table, Engine* _engine = NULL) {
 		table = _table;
 		//engine = _engine;
-		small_blind = _small_blind;
-		big_blind = _big_blind;
 	}
 	void reset_game_single() {
 		reset_game();
@@ -52,21 +52,28 @@ public:
 		if (playerscard[0][0] > playerscard[0][1]) swap(playerscard[0][0], playerscard[0][1]);
 		if (playerscard[1][0] > playerscard[1][1]) swap(playerscard[1][0], playerscard[1][1]);
 		winplayer = engine->compute_winner(playerscard[0], playerscard[1], community_cards);//计算第i个采样公共牌的胜负关系
+
 		for (int i = 0; i < table.playerlen; i++) {
 			unsigned cl = engine->get_preflop_cluster(playerscard[i]);
 			table.players[i].clusters[0] = cl;
 		}
 		for (int i = 0; i < table.playerlen; i++) {
-			unsigned cl = engine->get_flop_cluster(playerscard[i], community_cards);
+			unsigned cl = engine->get_flop_cluster(playerscard[i][0], playerscard[i][1], community_cards, true);
 			table.players[i].clusters[1] = cl;
+			cl = engine->get_flop_cluster(playerscard[i][0], playerscard[i][1], community_cards, false);
+			table.players[i].clusters[1 + 4] = cl;
 		}
 		for (int i = 0; i < table.playerlen; i++) {
-			unsigned cl = engine->get_turn_cluster(playerscard[i], community_cards);
+			unsigned cl = engine->get_turn_cluster(playerscard[i][0], playerscard[i][1], community_cards, true);
 			table.players[i].clusters[2] = cl;
+			cl = engine->get_turn_cluster(playerscard[i][0], playerscard[i][1], community_cards, false);
+			table.players[i].clusters[2 + 4] = cl;
 		}
 		for (int i = 0; i < table.playerlen; i++) {
-			unsigned cl = engine->get_river_cluster(playerscard[i], community_cards);
+			unsigned cl = engine->get_river_cluster(playerscard[i][0], playerscard[i][1], community_cards, true);
 			table.players[i].clusters[3] = cl;
+			cl = engine->get_river_cluster(playerscard[i][0], playerscard[i][1], community_cards, false);
+			table.players[i].clusters[3 + 4] = cl;
 		}
 	}
 	void reset_game() {
@@ -74,8 +81,10 @@ public:
 		betting_stage = 0;//preflop 0,flop 1, turn 2, river 3, shutdown 4, terminal 5
 		reset_betting_round_state();
 		has_allin = false;
-		table._assign_blinds(small_blind, big_blind);
-		last_bigbet = big_blind;
+		table._assign_blinds(50, 100);
+		last_bigbet = 100;
+		totraise = 0;
+		//while (!history.empty()) history.pop_back();
 	}
 	void move_to_next_player() {
 		player_i_index ^= 1;
@@ -89,6 +98,8 @@ public:
 			player_i_index = 0;
 		n_raises = 0;//current raise time
 		first_action_of_current_round = false; // flag check
+		ttpot = 1;
+		//otpot = 1;
 	}
 	int find_biggest_bet() {
 		int biggest_bet = 0;
@@ -140,16 +151,26 @@ public:
 		else if (actionstr <= 80 || actionstr == 160) {
 			int n_chips_to_call = last_bigbet - table.players[player_i_index].n_bet_chips();
 			int pot = table.total_pot + n_chips_to_call;
-			if (actionstr != 3)
-				last_raise = pot * actionstr / 200 * 100;
+
+			if (actionstr == 7)
+				assert(last_raise > 100 || (betting_stage == 0 && last_raise >= 100));
+			else if (actionstr == 5) 
+				last_raise = pot / 400 * 300;
+			else if (actionstr == 3) {
+				last_raise = pot / 300 * 100;
+				ttpot = 0;
+			}
 			else
-				last_raise = pot / 400 * 100;
+				last_raise = pot * actionstr / 200 * 100;
+			if (actionstr >= 8)
+				ttpot = 0;
 			int raise_n_chips = last_raise + n_chips_to_call;
 			last_bigbet += last_raise;
 			table.players[player_i_index].raise_to(raise_n_chips);
 			assert(last_bigbet == find_biggest_bet());
 			table.Add_pot(raise_n_chips);
 			n_raises++;
+			totraise++;
 		}
 		else if (actionstr == 'n') {
 			int n_chips = table.players[player_i_index].n_chips;
@@ -198,16 +219,25 @@ public:
 		else if (actionstr <= 80 || actionstr == 160) {
 			int n_chips_to_call = last_bigbet - table.players[player_i_index].n_bet_chips();
 			int pot = table.total_pot + n_chips_to_call;
-			if (actionstr != 3)
-				last_raise = pot * actionstr / 200 * 100;
+			if (actionstr == 7)
+				assert(last_raise > 100 || (betting_stage == 0 && last_raise >= 100));
+			else if (actionstr == 5)
+				last_raise = pot / 400 * 300;
+			else if (actionstr == 3) {
+				last_raise = pot / 300 * 100;
+				ttpot = 0;
+			}
 			else
-				last_raise = pot / 400 * 100;
+				last_raise = pot * actionstr / 200 * 100;
+			if (actionstr >= 8)
+				ttpot = 0;
 			int raise_n_chips = last_raise + n_chips_to_call;
 			last_bigbet += last_raise;
 			table.players[player_i_index].raise_to(raise_n_chips);
 			assert(last_bigbet == find_biggest_bet());
 			table.Add_pot(raise_n_chips);
 			n_raises++;
+			totraise++;
 		}
 		else {
 			cout << "action:" << actionstr << ",not exist the action" << endl;
@@ -241,6 +271,7 @@ public:
 			reset_betting_round_state();
 		assert(betting_stage <= 4);
 	}
+	
 	int legal_actions(unsigned char* actions) {
 		int chips = table.players[player_i_index].n_chips;
 		assert(table.total_pot == table.total());
@@ -251,32 +282,81 @@ public:
 			actions[cur++] = 'd'; //fold
 		actions[cur++] = 'l'; //call
 		if (has_allin == false) {
-			if (betting_stage <= 1) {
-				if (n_raises < 2) {
+			if (betting_stage == 0) {
+				if (cur_round_action_num < 3) {
 					int hraise_c = pot / 200 * 100;
-					if (last_raise <= hraise_c && chips > n_chips_to_call + hraise_c + 1000)
+					if (n_raises == 1 && hraise_c - last_raise >= 200 && pot <= 800)
+						actions[cur++] = (unsigned char)7; //min raise 
+					if (hraise_c >= 100 && last_raise <= hraise_c && chips >= n_chips_to_call + hraise_c + 5000)
 						actions[cur++] = (unsigned char)1; //raise 0.5 pot
+
 				}
-				if (cur_round_action_num < 2) {
-					for (int j = 1; j <= 3; j++) {	// 0.5, 1, 2, 4, 8 pot
+				if (cur_round_action_num < 4)
+					for (int j = 1; j <= 2; j++) {		// 1 2 pot
 						int raise_c = pot * (int)pow(2, j) / 200 * 100;
-						if (raise_c >= 100 && last_raise <= raise_c && chips > n_chips_to_call + raise_c + 1000) {
+						if (raise_c >= 100 && last_raise <= raise_c && chips >= n_chips_to_call + raise_c + 5000) {
 							actions[cur++] = (unsigned char)((int)pow(2, j));
 						}
 					}
-					int raise_c = pot * 10 / 100 * 100;
-					if (last_raise <= raise_c && chips > n_chips_to_call + raise_c + 1000) {
-						actions[cur++] = (unsigned char)(20);	//10 pot
-					}
-					raise_c = pot * 20 / 100 * 100;
-					if (last_raise <= raise_c && chips > n_chips_to_call + raise_c + 1000) {
-						actions[cur++] = (unsigned char)(40);	//20 pot
-					}
+			}
+			else if (betting_stage == 1) {
+				if (ttpot && n_raises == 0 && pot >= 1000 && pot <= 3600) {
+					int hraise_c = pot / 300 * 100;
+					if (hraise_c >= 100 && last_raise <= hraise_c && chips > n_chips_to_call + hraise_c + 5000)
+						actions[cur++] = (unsigned char)3; //raise 1/3 pot
 				}
-				else if (cur_round_action_num < 4)
-					for (int j = 1; j <= 1; j++) {		// 0.5, 1, 2, 4, 8 pot
+				if (cur_round_action_num < 2) {
+					int hraise_c = pot / 200 * 100;
+					if (n_raises == 1 && ttpot && hraise_c - last_raise >= 300 && pot <= 6000)
+						actions[cur++] = (unsigned char)7; //min raise 
+
+					if (last_raise <= hraise_c && chips > n_chips_to_call + hraise_c + 5000)
+						actions[cur++] = (unsigned char)1; //raise 0.5 pot
+
+					int spot = pot / 400 * 300;
+					if (spot >= 100 && last_raise <= spot && chips >= n_chips_to_call + spot + 5000 && spot - hraise_c >= 300)
+						actions[cur++] = (unsigned char)5; //raise 0.75 pot
+				}
+				else if (cur_round_action_num == 2) {
+					int hraise_c = pot / 200 * 100;
+					if (last_raise <= hraise_c && chips > n_chips_to_call + hraise_c + 5000)
+						actions[cur++] = (unsigned char)1; //raise 0.5 pot
+				}
+				if (cur_round_action_num < 4)
+					for (int j = 1; j <= 2; j++) {		// 0.5, 1, 2, 4, 8 pot
 						int raise_c = pot * (int)pow(2, j) / 200 * 100;
-						if (last_raise <= raise_c && chips > n_chips_to_call + raise_c + 1000) {
+						if (last_raise <= raise_c && chips >= n_chips_to_call + raise_c + 5000) {
+							actions[cur++] = (unsigned char)((int)pow(2, j));
+						}
+					}
+			}
+			else if (betting_stage == 2) {
+				if (ttpot && n_raises == 0 && pot >= 1000 && pot <= 3600) {
+					int hraise_c = pot / 300 * 100;
+					if (hraise_c >= 100 && last_raise <= hraise_c && chips >= n_chips_to_call + hraise_c + 5000)
+						actions[cur++] = (unsigned char)3; //raise 1/3 pot
+				}
+				if (cur_round_action_num < 2) {
+					int hraise_c = pot / 200 * 100;
+					if (n_raises == 1 && ttpot && hraise_c - last_raise >= 300 && pot <= 6000)
+						actions[cur++] = (unsigned char)7; //min raise 
+
+					if (last_raise <= hraise_c && chips > n_chips_to_call + hraise_c + 5000)
+						actions[cur++] = (unsigned char)1; //raise 0.5 pot
+
+					int spot = pot / 400 * 300;
+					if (spot >= 100 && last_raise <= spot && chips >= n_chips_to_call + spot + 5000 && spot - hraise_c >= 300)
+						actions[cur++] = (unsigned char)5; //raise 0.75 pot
+				}
+				else if (cur_round_action_num == 2) {
+					int hraise_c = pot / 200 * 100;
+					if (last_raise <= hraise_c && chips > n_chips_to_call + hraise_c + 5000)
+						actions[cur++] = (unsigned char)1; //raise 0.5 pot
+				}
+				if (cur_round_action_num < 4)
+					for (int j = 1; j <= 2; j++) {		// 0.5, 1, 2, 4, 8 pot
+						int raise_c = pot * (int)pow(2, j) / 200 * 100;
+						if (last_raise <= raise_c && chips >= n_chips_to_call + raise_c + 5000) {
 							actions[cur++] = (unsigned char)((int)pow(2, j));
 						}
 					}
@@ -284,21 +364,13 @@ public:
 			else {
 				if (n_raises < 2) {
 					int hraise_c = pot / 200 * 100;
-					if (last_raise <= hraise_c && chips > n_chips_to_call + hraise_c + 1000)
+					if (hraise_c >= 100 && last_raise <= hraise_c && chips >= n_chips_to_call + hraise_c + 5000)
 						actions[cur++] = (unsigned char)1; //raise 0.5 pot
 				}
-				if (cur_round_action_num < 2) {
-					for (int j = 1; j <= 2; j++) {	// 0.5, 1, 2, 4, 8 pot
+				if (cur_round_action_num < 4) {
+					for (int j = 1; j <= 1; j++) {	// 1, 2 pot
 						int raise_c = pot * (int)pow(2, j) / 200 * 100;
-						if (raise_c >= 100 && last_raise <= raise_c && chips > n_chips_to_call + raise_c + 1000) {
-							actions[cur++] = (unsigned char)((int)pow(2, j));
-						}
-					}
-				}
-				else if (cur_round_action_num < 4) {
-					for (int j = 1; j <= 1; j++) {	// 0.5, 1, 2, 4, 8 pot
-						int raise_c = pot * (int)pow(2, j) / 200 * 100;
-						if (raise_c >= 100 && last_raise <= raise_c && chips > n_chips_to_call + raise_c + 1000) {
+						if (raise_c >= 100 && last_raise <= raise_c && chips > n_chips_to_call + raise_c + 5000) {
 							actions[cur++] = (unsigned char)((int)pow(2, j));
 						}
 					}
@@ -312,15 +384,14 @@ public:
 };
 class Searchstate {
 public:
-	unsigned char has_allin, first_action_of_current_round, player_i_index, betting_stage, n_raises, small_blind, big_blind, winplayer;
+	unsigned char has_allin, first_action_of_current_round, player_i_index, betting_stage, n_raises, totraise, ttpot, winplayer;
 	SearchTable table;
 	unsigned short last_raise, last_bigbet, cur_round_action_num;
 
-	Searchstate(int _small_blind = 50, int _big_blind = 100) {
-		small_blind = _small_blind;
-		big_blind = _big_blind;
+	Searchstate() {
+
 	}
-	
+
 	void preflopset() {
 		assert(betting_stage == 0);
 		unsigned char playerscard[2][2], community_cards[5];
@@ -334,7 +405,7 @@ public:
 		if (playerscard[1][0] > playerscard[1][1]) swap(playerscard[1][0], playerscard[1][1]);
 		//因为当前轮已经固定 只计算一次当前轮的类别
 		for (int i = 0; i < table.playerlen; i++) {
-			short cl = engine->get_preflop_cluster(playerscard[i]);
+			unsigned cl = engine->get_preflop_cluster(playerscard[i]);
 			table.clusters[i][betting_stage] = cl;
 		}
 		for (int i = 0; i < 5; i++)//发剩余公共牌
@@ -342,12 +413,18 @@ public:
 
 		winplayer = engine->compute_winner(playerscard[0], playerscard[1], community_cards);//计算第i个采样公共牌的胜负关系
 		for (int i = 0; i < table.playerlen; i++) {
-			short cl = engine->get_flop_cluster(playerscard[i], community_cards);
+			unsigned cl = engine->get_flop_cluster(playerscard[i][0], playerscard[i][1], community_cards, true);
 			table.clusters[i][1] = cl;
-			cl = engine->get_turn_cluster(playerscard[i], community_cards);
+			cl = engine->get_flop_cluster(playerscard[i][0], playerscard[i][1], community_cards, false);
+			table.clusters[i][1 + 3] = cl;
+			cl = engine->get_turn_cluster(playerscard[i][0], playerscard[i][1], community_cards, true);
 			table.clusters[i][2] = cl;
-			cl = engine->get_river_cluster(playerscard[i], community_cards);
+			cl = engine->get_turn_cluster(playerscard[i][0], playerscard[i][1], community_cards, false);
+			table.clusters[i][2 + 3] = cl;
+			cl = engine->get_river_cluster(playerscard[i][0], playerscard[i][1], community_cards, true);
 			table.clusters[i][3] = cl;
+			cl = engine->get_river_cluster(playerscard[i][0], playerscard[i][1], community_cards, false);
+			table.clusters[i][3 + 3] = cl;
 		}
 	}
 	void setprivate_publiccards(unsigned char exclude[], int cardid_to_index[]) {
@@ -374,57 +451,29 @@ public:
 			community_cards[i] = table.deck.deal_one_card();
 
 		winplayer = engine->compute_winner(playerscard[0], playerscard[1], community_cards);//计算第i个采样公共牌的胜负关系
+
 		if (betting_stage == 1) {
 			for (int i = 0; i < table.playerlen; i++) {
-				short cl = engine->get_turn_cluster(playerscard[i], community_cards);
+				unsigned cl = engine->get_turn_cluster(playerscard[i][0], playerscard[i][1], community_cards, true);
 				table.clusters[i][2] = cl;
-				cl = engine->get_river_cluster(playerscard[i], community_cards);
+				cl = engine->get_turn_cluster(playerscard[i][0], playerscard[i][1], community_cards, false);
+				table.clusters[i][2 + 3] = cl;
+				cl = engine->get_river_cluster(playerscard[i][0], playerscard[i][1], community_cards, true);
 				table.clusters[i][3] = cl;
+				cl = engine->get_river_cluster(playerscard[i][0], playerscard[i][1], community_cards, false);
+				table.clusters[i][3 + 3] = cl;
 			}
 		}
 		else if (betting_stage == 2) {
 			for (int i = 0; i < table.playerlen; i++) {
-				short cl = engine->get_river_cluster(playerscard[i], community_cards);
+				unsigned cl = engine->get_river_cluster(playerscard[i][0], playerscard[i][1], community_cards, true);
 				table.clusters[i][3] = cl;
+				cl = engine->get_river_cluster(playerscard[i][0], playerscard[i][1], community_cards, false);
+				table.clusters[i][3 + 3] = cl;
 			}
 		}
 	}
-	void setprivate_publiccards(unsigned char exclude[], int endbettingstage) {
-		unsigned char playerscard[2][2], community_cards[5];
-		//剔除已有公共牌
-		if (endbettingstage) {
-			table.deck.reset(exclude, endbettingstage + 6);
-			for (int i = 0; i < endbettingstage + 2; i++)
-				community_cards[i] = exclude[i + 4];
-		}
-		else
-			table.deck.reset(exclude, 4);
-		//设置不安全搜索手牌
-		playerscard[0][0] = exclude[0];
-		playerscard[0][1] = exclude[1];
-		playerscard[1][0] = exclude[2];
-		playerscard[1][1] = exclude[3];
-		if (playerscard[0][0] > playerscard[0][1]) swap(playerscard[0][0], playerscard[0][1]);
-		if (playerscard[1][0] > playerscard[1][1]) swap(playerscard[1][0], playerscard[1][1]);
-
-		for (int i = 0; i < table.deck.cur_index; i++)
-			assert(table.deck.cards[i] == exclude[i]);
-		for (int i = endbettingstage ? endbettingstage + 2 : 0; i < 5; i++)//发剩余公共牌
-			community_cards[i] = table.deck.deal_one_card();
-
-		winplayer = engine->compute_winner(playerscard[0], playerscard[1], community_cards);//计算第i个采样公共牌的胜负关系
-
-		for (int i = 0; i < table.playerlen; i++) {
-			short cl = engine->get_preflop_cluster(playerscard[i]);
-			table.clusters[i][0] = cl;
-			cl = engine->get_flop_cluster(playerscard[i], community_cards);
-			table.clusters[i][1] = cl;
-			cl = engine->get_turn_cluster(playerscard[i], community_cards);
-			table.clusters[i][2] = cl;
-			cl = engine->get_river_cluster(playerscard[i], community_cards);
-			table.clusters[i][3] = cl;
-		}
-	}
+	
 	void setpubliccards(unsigned char exclude[], int cardid_to_index[]) {	//根据采样一组手牌和当前手牌对应的10组公共牌进行计算
 		unsigned char playerscard[2][2], community_cards[5];
 		if (betting_stage > 0) {	//剔除已有公共牌
@@ -443,7 +492,7 @@ public:
 		if (playerscard[1][0] > playerscard[1][1]) swap(playerscard[1][0], playerscard[1][1]);
 		if (betting_stage == 0) {	//因为当前轮已经固定 只计算一次当前轮的类别
 			for (int i = 0; i < table.playerlen; i++) {
-				short cl = engine->get_preflop_cluster(playerscard[i]);
+				unsigned cl = engine->get_preflop_cluster(playerscard[i]);
 				table.clusters[i][0] = cl;
 			}
 		}
@@ -457,26 +506,38 @@ public:
 		winplayer = engine->compute_winner(playerscard[0], playerscard[1], community_cards);//计算第i个采样公共牌的胜负关系
 		if (betting_stage == 0) {
 			for (int i = 0; i < table.playerlen; i++) {
-				short cl = engine->get_flop_cluster(playerscard[i], community_cards);
+				unsigned cl = engine->get_flop_cluster(playerscard[i][0], playerscard[i][1], community_cards, true);
 				table.clusters[i][1] = cl;
-				cl = engine->get_turn_cluster(playerscard[i], community_cards);
+				cl = engine->get_flop_cluster(playerscard[i][0], playerscard[i][1], community_cards, false);
+				table.clusters[i][1 + 3] = cl;
+				cl = engine->get_turn_cluster(playerscard[i][0], playerscard[i][1], community_cards, true);
 				table.clusters[i][2] = cl;
-				cl = engine->get_river_cluster(playerscard[i], community_cards);
+				cl = engine->get_turn_cluster(playerscard[i][0], playerscard[i][1], community_cards, false);
+				table.clusters[i][2 + 3] = cl;
+				cl = engine->get_river_cluster(playerscard[i][0], playerscard[i][1], community_cards, true);
 				table.clusters[i][3] = cl;
+				cl = engine->get_river_cluster(playerscard[i][0], playerscard[i][1], community_cards, false);
+				table.clusters[i][3 + 3] = cl;
 			}
 		}
 		else if (betting_stage == 1) {
 			for (int i = 0; i < table.playerlen; i++) {
-				short cl = engine->get_turn_cluster(playerscard[i], community_cards);
+				unsigned cl = engine->get_turn_cluster(playerscard[i][0], playerscard[i][1], community_cards, true);
 				table.clusters[i][2] = cl;
-				cl = engine->get_river_cluster(playerscard[i], community_cards);
+				cl = engine->get_turn_cluster(playerscard[i][0], playerscard[i][1], community_cards, false);
+				table.clusters[i][2 + 3] = cl;
+				cl = engine->get_river_cluster(playerscard[i][0], playerscard[i][1], community_cards, true);
 				table.clusters[i][3] = cl;
+				cl = engine->get_river_cluster(playerscard[i][0], playerscard[i][1], community_cards, false);
+				table.clusters[i][3 + 3] = cl;
 			}
 		}
 		else if (betting_stage == 2) {
 			for (int i = 0; i < table.playerlen; i++) {
-				short cl = engine->get_river_cluster(playerscard[i], community_cards);
+				unsigned cl = engine->get_river_cluster(playerscard[i][0], playerscard[i][1], community_cards, true);
 				table.clusters[i][3] = cl;
+				cl = engine->get_river_cluster(playerscard[i][0], playerscard[i][1], community_cards, false);
+				table.clusters[i][3 + 3] = cl;
 			}
 		}
 	}
@@ -485,8 +546,9 @@ public:
 		betting_stage = 0;//preflop 0,flop 1, turn 2, river 3, shutdown 4, terminal 5
 		reset_betting_round_state();
 		has_allin = false;
-		table._assign_blinds(small_blind, big_blind);
-		last_bigbet = big_blind;
+		table._assign_blinds(50, 100);
+		last_bigbet = 100;
+		totraise = 0;
 		//while (!history.empty()) history.pop_back();
 	}
 	void move_to_next_player() {
@@ -501,6 +563,7 @@ public:
 			player_i_index = 0;
 		n_raises = 0;//current raise time
 		first_action_of_current_round = false; // flag check
+		ttpot = 1;
 	}
 	int find_biggest_bet() {
 		int biggest_bet = 0;
@@ -552,19 +615,25 @@ public:
 		else if (actionstr <= 80 || actionstr == 160) {
 			int n_chips_to_call = last_bigbet - table.players[player_i_index].n_bet_chips();
 			int pot = table.total_pot + n_chips_to_call;
-			if (actionstr != 3)
-				last_raise = pot * actionstr / 200 * 100;
+			if (actionstr == 7)
+				assert(last_raise >= 100);
+			else if (actionstr == 5)
+				last_raise = pot / 400 * 300;
+			else if (actionstr == 3) {
+				last_raise = pot / 300 * 100;
+				ttpot = 0;
+			}
 			else
-				last_raise = pot / 400 * 100;
+				last_raise = pot * actionstr / 200 * 100;
+			if (actionstr >= 8)
+				ttpot = 0;
 			int raise_n_chips = last_raise + n_chips_to_call;
 			last_bigbet += last_raise;
 			table.players[player_i_index].raise_to(raise_n_chips);
-			if (last_bigbet != find_biggest_bet()) {
-				cout << last_bigbet << "," << find_biggest_bet() << endl;
-				assert(last_bigbet == find_biggest_bet());
-			}
+			assert(last_bigbet == find_biggest_bet());
 			table.Add_pot(raise_n_chips);
 			n_raises++;
+			totraise++;
 		}
 		else if (actionstr == 'n') {
 			int n_chips = table.players[player_i_index].n_chips;
@@ -587,7 +656,6 @@ public:
 			cout << "action:" << actionstr << ",not exist the action" << endl;
 			throw exception();
 		}
-		assert(table.total() == table.total_pot);
 		move_to_next_player();
 		if ((actionstr == 'l' || actionstr == 'k') && first_action_of_current_round) {
 			if (has_allin)
@@ -623,16 +691,25 @@ public:
 		else if (actionstr <= 80 || actionstr == 160) {
 			int n_chips_to_call = last_bigbet - table.players[player_i_index].n_bet_chips();
 			int pot = table.total_pot + n_chips_to_call;
-			if (actionstr != 3)
-				last_raise = pot * actionstr / 200 * 100;
+			if (actionstr == 7)
+				assert(last_raise >= 100);
+			else if (actionstr == 5)
+				last_raise = pot / 400 * 300;
+			else if (actionstr == 3) {
+				last_raise = pot / 300 * 100;
+				ttpot = 0;
+			}
 			else
-				last_raise = pot / 400 * 100;
+				last_raise = pot * actionstr / 200 * 100;
+			if (actionstr >= 8)
+				ttpot = 0;
 			int raise_n_chips = last_raise + n_chips_to_call;
 			last_bigbet += last_raise;
 			table.players[player_i_index].raise_to(raise_n_chips);
 			assert(last_bigbet == find_biggest_bet());
 			table.Add_pot(raise_n_chips);
 			n_raises++;
+			totraise++;
 		}
 		else if (raise_action_chips.find(actionstr) != raise_action_chips.end()) {
 			int n_chips_to_call = last_bigbet - table.players[player_i_index].n_bet_chips();
@@ -647,12 +724,11 @@ public:
 			cout << "action:" << actionstr << ",not exist the action" << endl;
 			throw exception();
 		}
-		assert(table.total() == table.total_pot);
 		move_to_next_player();
 		if (betting_stage == 5) {
 			compute_payout();
 		}
-		else if ((actionstr == 'l' || actionstr == 'k') && first_action_of_current_round && first_action_of_current_round) {
+		else if ((actionstr == 'l' || actionstr == 'k') && first_action_of_current_round) {
 			if (has_allin) {
 				compute_payout(winplayer);
 				betting_stage = 4;
@@ -687,15 +763,32 @@ public:
 			actions[cur++] = 'd'; //fold
 		actions[cur++] = 'l'; //call
 		if (has_allin == false) {
-			if (n_raises < 2) {
+			if (n_raises == 0 && pot >= 1000 && pot <= 4800) {
+				int hraise_c = pot / 300 * 100;
+				if (hraise_c >= 100 && last_raise <= hraise_c && chips >= n_chips_to_call + hraise_c + 5000)
+					actions[cur++] = (unsigned char)3; //raise 1/3 pot
+			}
+			if (cur_round_action_num < 2) {
 				int hraise_c = pot / 200 * 100;
-				if (last_raise <= hraise_c && chips > n_chips_to_call + hraise_c + 1000)
+				if (n_raises == 1 && ttpot && hraise_c - last_raise >= 300 && pot <= 8000)
+					actions[cur++] = (unsigned char)7; //min raise 
+
+				if (last_raise <= hraise_c && chips > n_chips_to_call + hraise_c + 2000)
+					actions[cur++] = (unsigned char)1; //raise 0.5 pot
+
+				int spot = pot / 400 * 300;
+				if (spot >= 100 && last_raise <= spot && chips >= n_chips_to_call + spot + 4000 && spot - hraise_c >= 300)
+					actions[cur++] = (unsigned char)5; //raise 0.75 pot
+			}
+			else if (cur_round_action_num == 2) {
+				int hraise_c = pot / 200 * 100;
+				if (last_raise <= hraise_c && chips > n_chips_to_call + hraise_c + 4000)
 					actions[cur++] = (unsigned char)1; //raise 0.5 pot
 			}
 			if (cur_round_action_num < 4)
-				for (int j = 1; j <= 3; j++) {		// 0.5, 1, 2, 4 pot
+				for (int j = 1; j <= 2; j++) {		// 0.5, 1, 2, 4, 8 pot
 					int raise_c = pot * (int)pow(2, j) / 200 * 100;
-					if (last_raise <= raise_c && chips > n_chips_to_call + raise_c + 1000) {
+					if (last_raise <= raise_c && chips >= n_chips_to_call + raise_c + 4000) {
 						actions[cur++] = (unsigned char)((int)pow(2, j));
 					}
 				}
@@ -714,32 +807,80 @@ public:
 			actions[cur++] = 'd'; //fold
 		actions[cur++] = 'l'; //call
 		if (has_allin == false) {
-			if (betting_stage <= 1) {
-				if (n_raises < 2) {
+			if (betting_stage == 0) {
+				if (cur_round_action_num < 3) {
 					int hraise_c = pot / 200 * 100;
-					if (last_raise <= hraise_c && chips > n_chips_to_call + hraise_c + 1000)
+					if (n_raises == 1 && hraise_c - last_raise >= 200 && pot <= 800)
+						actions[cur++] = (unsigned char)7; //min raise 
+					if (hraise_c >= 100 && last_raise <= hraise_c && chips >= n_chips_to_call + hraise_c + 5000)
 						actions[cur++] = (unsigned char)1; //raise 0.5 pot
 				}
-				if (cur_round_action_num < 2) {
-					for (int j = 1; j <= 3; j++) {	// 0.5, 1, 2, 4, 8 pot
+				if (cur_round_action_num < 4)
+					for (int j = 1; j <= 2; j++) {		// 1 2 pot
 						int raise_c = pot * (int)pow(2, j) / 200 * 100;
-						if (raise_c >= 100 && last_raise <= raise_c && chips > n_chips_to_call + raise_c + 1000) {
+						if (raise_c >= 100 && last_raise <= raise_c && chips >= n_chips_to_call + raise_c + 5000) {
 							actions[cur++] = (unsigned char)((int)pow(2, j));
 						}
 					}
-					int raise_c = pot * 10 / 100 * 100;
-					if (last_raise <= raise_c && chips > n_chips_to_call + raise_c + 1000) {
-						actions[cur++] = (unsigned char)(20);	//10 pot
-					}
-					raise_c = pot * 20 / 100 * 100;
-					if (last_raise <= raise_c && chips > n_chips_to_call + raise_c + 1000) {
-						actions[cur++] = (unsigned char)(40);	//20 pot
-					}
+			}
+			else if (betting_stage == 1) {
+				if (ttpot && n_raises == 0 && pot >= 1000 && pot <= 3600) {
+					int hraise_c = pot / 300 * 100;
+					if (hraise_c >= 100 && last_raise <= hraise_c && chips > n_chips_to_call + hraise_c + 5000)
+						actions[cur++] = (unsigned char)3; //raise 1/3 pot
 				}
-				else if (cur_round_action_num < 4)
-					for (int j = 1; j <= 1; j++) {		// 0.5, 1, 2, 4, 8 pot
+				if (cur_round_action_num < 2) {
+					int hraise_c = pot / 200 * 100;
+					if (n_raises == 1 && ttpot && hraise_c - last_raise >= 300 && pot <= 6000)
+						actions[cur++] = (unsigned char)7; //min raise 
+
+					if (last_raise <= hraise_c && chips > n_chips_to_call + hraise_c + 5000)
+						actions[cur++] = (unsigned char)1; //raise 0.5 pot
+
+					int spot = pot / 400 * 300;
+					if (spot >= 100 && last_raise <= spot && chips >= n_chips_to_call + spot + 5000 && spot - hraise_c >= 300)
+						actions[cur++] = (unsigned char)5; //raise 0.75 pot
+				}
+				else if (cur_round_action_num == 2) {
+					int hraise_c = pot / 200 * 100;
+					if (last_raise <= hraise_c && chips > n_chips_to_call + hraise_c + 5000)
+						actions[cur++] = (unsigned char)1; //raise 0.5 pot
+				}
+				if (cur_round_action_num < 4)
+					for (int j = 1; j <= 2; j++) {		// 0.5, 1, 2, 4, 8 pot
 						int raise_c = pot * (int)pow(2, j) / 200 * 100;
-						if (last_raise <= raise_c && chips > n_chips_to_call + raise_c + 1000) {
+						if (last_raise <= raise_c && chips >= n_chips_to_call + raise_c + 5000) {
+							actions[cur++] = (unsigned char)((int)pow(2, j));
+						}
+					}
+			}
+			else if (betting_stage == 2) {
+				if (ttpot && n_raises == 0 && pot >= 1000 && pot <= 3600) {
+					int hraise_c = pot / 300 * 100;
+					if (hraise_c >= 100 && last_raise <= hraise_c && chips >= n_chips_to_call + hraise_c + 5000)
+						actions[cur++] = (unsigned char)3; //raise 1/3 pot
+				}
+				if (cur_round_action_num < 2) {
+					int hraise_c = pot / 200 * 100;
+					if (n_raises == 1 && ttpot && hraise_c - last_raise >= 300 && pot <= 6000)
+						actions[cur++] = (unsigned char)7; //min raise 
+
+					if (last_raise <= hraise_c && chips > n_chips_to_call + hraise_c + 5000)
+						actions[cur++] = (unsigned char)1; //raise 0.5 pot
+
+					int spot = pot / 400 * 300;
+					if (spot >= 100 && last_raise <= spot && chips >= n_chips_to_call + spot + 5000 && spot - hraise_c >= 300)
+						actions[cur++] = (unsigned char)5; //raise 0.75 pot
+				}
+				else if (cur_round_action_num == 2) {
+					int hraise_c = pot / 200 * 100;
+					if (last_raise <= hraise_c && chips > n_chips_to_call + hraise_c + 5000)
+						actions[cur++] = (unsigned char)1; //raise 0.5 pot
+				}
+				if (cur_round_action_num < 4)
+					for (int j = 1; j <= 2; j++) {		// 0.5, 1, 2, 4, 8 pot
+						int raise_c = pot * (int)pow(2, j) / 200 * 100;
+						if (last_raise <= raise_c && chips >= n_chips_to_call + raise_c + 5000) {
 							actions[cur++] = (unsigned char)((int)pow(2, j));
 						}
 					}
@@ -747,21 +888,13 @@ public:
 			else {
 				if (n_raises < 2) {
 					int hraise_c = pot / 200 * 100;
-					if (last_raise <= hraise_c && chips > n_chips_to_call + hraise_c + 1000)
+					if (hraise_c >= 100 && last_raise <= hraise_c && chips >= n_chips_to_call + hraise_c + 5000)
 						actions[cur++] = (unsigned char)1; //raise 0.5 pot
 				}
-				if (cur_round_action_num < 2) {
-					for (int j = 1; j <= 2; j++) {	// 0.5, 1, 2, 4, 8 pot
+				if (cur_round_action_num < 4) {
+					for (int j = 1; j <= 1; j++) {	// 1, 2 pot
 						int raise_c = pot * (int)pow(2, j) / 200 * 100;
-						if (raise_c >= 100 && last_raise <= raise_c && chips > n_chips_to_call + raise_c + 1000) {
-							actions[cur++] = (unsigned char)((int)pow(2, j));
-						}
-					}
-				}
-				else if (cur_round_action_num < 4) {
-					for (int j = 1; j <= 1; j++) {	// 0.5, 1, 2, 4, 8 pot
-						int raise_c = pot * (int)pow(2, j) / 200 * 100;
-						if (raise_c >= 100 && last_raise <= raise_c && chips > n_chips_to_call + raise_c + 1000) {
+						if (raise_c >= 100 && last_raise <= raise_c && chips > n_chips_to_call + raise_c + 5000) {
 							actions[cur++] = (unsigned char)((int)pow(2, j));
 						}
 					}
@@ -772,16 +905,43 @@ public:
 		}
 		return cur;
 	}
+	
+	int getraisechip(unsigned char actionstrt) {
+		if (actionstrt == 'l' || actionstrt == 'd')
+			throw exception();
+		if (actionstrt == 'n')
+			return table.players[player_i_index].n_chips;
 
-	bool check_action(unsigned char actionstr) {
-		if (actionstr <= 80 || actionstr == 160) {
+		int n_chips_to_call = last_bigbet - table.players[player_i_index].n_bet_chips();
+		int pot = table.total_pot + n_chips_to_call;
+		int chips = table.players[player_i_index].n_chips;
+		int returnchips;
+		if (actionstrt == 7)
+			returnchips = last_raise;
+		else if (actionstrt == 5)
+			returnchips = pot / 400 * 300;
+		else if (actionstrt == 3)
+			returnchips = pot / 300 * 100;
+		else
+			returnchips = pot * actionstrt / 200 * 100;
+
+		return returnchips;
+	}
+	bool check_action(unsigned char actionstrt) {
+		if (actionstrt <= 80 || actionstrt == 160) {
 			int n_chips_to_call = last_bigbet - table.players[player_i_index].n_bet_chips();
 			int pot = table.total_pot + n_chips_to_call;
-			if (actionstr != 3)
-				last_raise = pot * actionstr / 200 * 100;
+			int returnchips;
+			if (actionstrt == 7)
+				returnchips = last_raise;
+			else if (actionstrt == 5)
+				returnchips = pot / 400 * 300;
+			else if (actionstrt == 3)
+				returnchips = pot / 300 * 100;
 			else
-				last_raise = pot / 400 * 100;
-			int raise_n_chips = last_raise + n_chips_to_call;
+				returnchips = pot * actionstrt / 200 * 100;
+
+			int raise_n_chips = returnchips + n_chips_to_call;
 			if (table.players[player_i_index].n_chips <= raise_n_chips)
 				return false;
 		}
@@ -794,29 +954,42 @@ public:
 			throw exception();
 		}
 		if (raise_action_chips[nodeactionstr] == 0) {
+			if (nodeactionstr == 'l' || nodeactionstr == 'n')
+				return false;
 			int raise_chipsnumber;
 			int n_chips_to_call = last_bigbet - table.players[player_i_index].n_bet_chips();
 			int pot = table.total_pot + n_chips_to_call;
-			if (nodeactionstr != 3)
-				raise_chipsnumber = pot * nodeactionstr / 200 * 100;
+			if (nodeactionstr == 7)
+				raise_chipsnumber = last_raise;
+			else if (nodeactionstr == 5)
+				raise_chipsnumber = pot / 400 * 300;
+			else if (nodeactionstr == 3)
+				raise_chipsnumber = pot / 300 * 100;
 			else
-				raise_chipsnumber = pot / 400 * 100;
+				raise_chipsnumber = pot * nodeactionstr / 200 * 100;
+
 			return human_raisechips == raise_chipsnumber;
 		}
 		else
-			return raise_action_chips[nodeactionstr] == human_raisechips;
+			return false;
 	}
 	bool check_raise_errorlow100(unsigned char nodeactionstr, int human_raisechips) {
+		if (nodeactionstr == 'l' || nodeactionstr == 'n')
+			return false;
 		int raise_chipsnumber;
 		int n_chips_to_call = last_bigbet - table.players[player_i_index].n_bet_chips();
 		int pot = table.total_pot + n_chips_to_call;
-		if (nodeactionstr != 3)
-			raise_chipsnumber = pot * nodeactionstr / 200 * 100;
+		if (nodeactionstr == 7)
+			raise_chipsnumber = last_raise;
+		else if (nodeactionstr == 5)
+			raise_chipsnumber = pot / 400 * 300;
+		else if (nodeactionstr == 3)
+			raise_chipsnumber = pot / 300 * 100;
 		else
-			raise_chipsnumber = pot / 400 * 100;
+			raise_chipsnumber = pot * nodeactionstr / 200 * 100;
 		raise_chipsnumber = raise_chipsnumber - human_raisechips;
 		if (raise_chipsnumber < 0)
 			raise_chipsnumber = -raise_chipsnumber;
-		return raise_chipsnumber < 100;
+		return raise_chipsnumber <= 100;
 	}
 };
