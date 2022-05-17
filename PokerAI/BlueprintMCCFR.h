@@ -136,7 +136,7 @@ double blueprint_cfrp(strategy_node* cnode[], Pokerstate& state, int pi, int c, 
 		int len = cnode[0]->action_len;
 		double voa[12] = { 0 };
 		for (int i = 0; i < len; i++) {
-			if (sigma[i] > 0) {
+			if (sigma[i] > 0) { 
 				Pokerstate st2 = state;
 				bool is_chance = st2.apply_action(cnode[ph]->actionstr[i]);
 				strategy_node* cnode2[2];
